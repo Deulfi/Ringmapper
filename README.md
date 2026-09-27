@@ -64,9 +64,8 @@ it if the ring disconnects and reconnects later.
   requirement, not a bug (the cursor should be moved to the left bottom
   corner to 'hide' it, but it may be still on the screen on big displays)
 - `swipe` uses Android's own fling physics rather than raw distance-only
-
-<img width="782" height="728" alt="{C729AD66-909D-4715-BBBB-DB6F716C0E51}" src="https://github.com/user-attachments/assets/48cfa59f-4ef1-4b41-a216-cbb417a7c481" />
-
   motion, so travel distance also depends on the configured speed/intensity
 - Rapid repeated swipes in quick succession may fire as separate, slightly 
   overlapping touch events rather than one merged motion
+## Picture of a JX-11 ring
+  <img width="360" height="360" alt="{C729AD66-909D-4715-BBBB-DB6F716C0E51}" src="https://github.com/user-attachments/assets/48cfa59f-4ef1-4b41-a216-cbb417a7c481" />
