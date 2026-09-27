@@ -8,8 +8,21 @@
 #include <sys/ioctl.h>
 #include <linux/input.h>
 #include <linux/uinput.h>
+#include <libgen.h>
+#include <unistd.h>
 
-#define CONFIG_PATH "/data/adb/modules/ring_mapper/config.txt"
+char CONFIG_PATH[512];
+
+void resolve_config_path(const char *argv0) {
+    char exe_path[512];
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len > 0) {
+        exe_path[len] = 0;
+        snprintf(CONFIG_PATH, sizeof(CONFIG_PATH), "%s/config.txt", dirname(exe_path));
+    } else {
+        strcpy(CONFIG_PATH, "config.txt"); /* fallback: relative to cwd */
+    }
+}
 
 int SCREEN_W = 1080, SCREEN_H = 2400; /* fallback if detection fails */
 
@@ -182,6 +195,7 @@ void schedule_cursor_park(int ui) {
 }
 
 int main(void) {
+    resolve_config_path(argv[0])
     config_t cfg;
     if (load_config(&cfg) < 0) { fprintf(stderr, "ring_mapper: cannot read config %s\n", CONFIG_PATH); return 1; }
     detect_screen_size();
