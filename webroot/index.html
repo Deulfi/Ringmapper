@@ -102,7 +102,7 @@ function stopDaemon(){
   ksu.exec("pkill -f /ring_mapper/service.sh; pkill -f /ring_mapper/ring_mapper; exit 0", "{}", "onStop");
 }
 function onStop(errno){
-  document.getElementById("status").innerText = "Disabled, reboot to enable again.";
+  document.getElementById("status").innerText = "Daemon stopped.";
 }
 
 window.onload = loadConfig;
