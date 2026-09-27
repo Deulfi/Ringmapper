@@ -22,7 +22,7 @@ direction, and re-emits a real, configurable action.
 
 ## Install
 
-1. Download this repo as a ZIP from GitHub (`Code` → `Download ZIP`)
+1. Download the ZIP from release (or build one yourself with the file from the repo)
 2. Flash/install the ZIP directly through Magisk Manager or APatch's 
    module installer ("Install from storage")
 3. Reboot
