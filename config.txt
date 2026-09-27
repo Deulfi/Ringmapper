@@ -1,0 +1,9 @@
+name=JX-11
+up=scroll_up
+down=scroll_down
+left=page_prev
+right=page_next
+up_mult=1
+down_mult=1
+left_mult=1
+right_mult=1

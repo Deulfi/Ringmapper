@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Ring Mapper</title>
+<style>
+:root {
+  --bg:#f5f5f5; --fg:#111; --card:#fff; --border:#ccc; --accent:#2563eb; --danger:#dc2626;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#121212; --fg:#eee; --card:#1e1e1e; --border:#444; --accent:#3b82f6; --danger:#ef4444; }
+}
+body{font-family:sans-serif;padding:16px;background:var(--bg);color:var(--fg)}
+label{display:block;margin-top:12px;font-size:14px}
+select,input{width:100%;padding:8px;margin-top:4px;background:var(--card);color:var(--fg);
+  border:1px solid var(--border);border-radius:6px;box-sizing:border-box}
+button{margin-top:20px;width:100%;padding:12px;font-size:16px;border:none;border-radius:6px;color:#fff}
+.apply{background:var(--accent)}
+.stop{background:var(--danger);margin-top:10px}
+#status{margin-top:12px;font-size:14px}
+</style></head>
+<body>
+<h2>Ring Mapper Config</h2>
+<label>Device name (from getevent)<input id="name" value="JX-11"></label>
+
+<label>Swipe Up<select id="up"></select></label>
+<label>Up multiplier<input id="up_mult" type="number" min="-50" max="50" value="1"></label>
+
+<label>Swipe Down<select id="down"></select></label>
+<label>Down multiplier<input id="down_mult" type="number" min="-50" max="50" value="1"></label>
+
+<label>Swipe Left<select id="left"></select></label>
+<label>Left multiplier<input id="left_mult" type="number" min="-50" max="50" value="1"></label>
+
+<label>Swipe Right<select id="right"></select></label>
+<label>Right multiplier<input id="right_mult" type="number" min="-50" max="50" value="1"></label>
+
+<label>Swipe speed/intensity (ms) — lower = faster fling, higher = slower/shorter<input id="swipe_duration_ms" type="number" min="10" max="2000" value="200"></label>
+<button class="apply" onclick="applyConfig()">Apply</button>
+<button class="stop" onclick="stopDaemon()">Stop</button>
+<p id="status"></p>
+
+<script>
+const ACTIONS = ["scroll_up","scroll_down","dpad_up","dpad_down","page_up","page_down","page_prev","page_next","swipe","none"];
+const CFG = "/data/adb/modules/ring_mapper/config.txt";
+
+function populate(cur){
+  ["up","down","left","right"].forEach(d=>{
+    const sel = document.getElementById(d);
+    sel.innerHTML = ACTIONS.map(a=>`<option value="${a}" ${cur[d]===a?"selected":""}>${a}</option>`).join("");
+    sel.onchange = () => { document.getElementById(d+"_mult").value = 1; };
+  });
+}
+
+function loadConfig(){ ksu.exec(`cat ${CFG}`, "{}", "onLoad"); }
+function onLoad(errno, stdout){
+  const cfg = {};
+  stdout.split("\n").forEach(l=>{ const [k,v]=l.split("="); if(k&&v) cfg[k.trim()]=v.trim(); });
+  document.getElementById("name").value = cfg.name || "JX-11";
+  populate(cfg);
+  ["up","down","left","right"].forEach(d=>{
+    document.getElementById(d+"_mult").value = cfg[d+"_mult"] || "1";
+  });
+  document.getElementById("swipe_duration_ms").value = cfg.swipe_duration_ms || "200";
+}
+
+function clamp(id, min, max){
+  const el = document.getElementById(id);
+  let v = parseInt(el.value, 10);
+  if (isNaN(v)) v = min;
+  v = Math.max(min, Math.min(max, v));
+  el.value = v;
+  return v;
+}
+
+function applyConfig(){
+  const name = document.getElementById("name").value.trim();
+  const up = document.getElementById("up").value;
+  const down = document.getElementById("down").value;
+  const left = document.getElementById("left").value;
+  const right = document.getElementById("right").value;
+
+  const up_mult = clamp("up_mult", -50, 50);
+  const down_mult = clamp("down_mult", -50, 50);
+  const left_mult = clamp("left_mult", -50, 50);
+  const right_mult = clamp("right_mult", -50, 50);
+  const swipe_duration_ms = clamp("swipe_duration_ms", 10, 2000);
+
+  const body = `name=${name}\nup=${up}\ndown=${down}\nleft=${left}\nright=${right}\n`
+    + `up_mult=${up_mult}\ndown_mult=${down_mult}\nleft_mult=${left_mult}\nright_mult=${right_mult}\n`
+    + `swipe_duration_ms=${swipe_duration_ms}\n`;
+
+  const cmd = `cat > ${CFG} << 'EOF'\n${body}EOF\npkill -f /ring_mapper/ring_mapper; exit 0`;
+  ksu.exec(cmd, "{}", "onApply");
+  ksu.exec("/data/adb/modules/ring_mapper/ring_mapper >/dev/null 2>&1 &", "{}", "onStart");
+}
+function onApply(errno){
+  document.getElementById("status").innerText = "Applied.";
+}
+function onStart(errno){
+  document.getElementById("status").innerText = "Started.";
+}
+function stopDaemon(){
+  ksu.exec("pkill -f /ring_mapper/service.sh; pkill -f /ring_mapper/ring_mapper; exit 0", "{}", "onStop");
+}
+function onStop(errno){
+  document.getElementById("status").innerText = "Disabled, reboot to enable again.";
+}
+
+window.onload = loadConfig;
+</script>
+</body></html>
