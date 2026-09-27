@@ -45,9 +45,8 @@ Hit **Apply** to save and restart the daemon with new settings.
 
 ## How it works
 
-A small C binary (no Python/Termux dependency) finds the ring's input 
-device by name, grabs it exclusively (`EVIOCGRAB`, so its raw touches don't 
-also leak through to whatever app is in the foreground), decodes swipe 
+A small C binary finds the ring's input 
+device by name, grabs it exclusively, decodes swipe 
 direction/distance, and re-emits either:
 - a virtual mouse device (`REL_WHEEL` for scroll, or cursor movement for 
   the `swipe` action — Android requires pointer capability for either, so 
@@ -62,7 +61,8 @@ it if the ring disconnects and reconnects later.
 
 - A cursor icon appears while `scroll_up`/`scroll_down`/`swipe` is active 
   on any direction — this is a hard Android input-classification 
-  requirement, not a bug
+  requirement, not a bug (the cursor should be moved to the left bottom
+  corner to 'hide' it, but it may be still on the screen on big displays)
 - `swipe` uses Android's own fling physics rather than raw distance-only 
   motion, so travel distance also depends on the configured speed/intensity
 - Rapid repeated swipes in quick succession may fire as separate, slightly 
