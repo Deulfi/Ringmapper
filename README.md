@@ -15,7 +15,7 @@ direction, and re-emits a real, configurable action.
 
 ## Requirements
 
-- Root via Magisk or APatch
+- Magisk or APatch (duh)
 - Your ring must show up in `getevent -l` (tested with JX-11; other 
   identically-designed AliExpress ring clickers likely share the same 
   protocol — check the device name matches or update it in the WebUI)
