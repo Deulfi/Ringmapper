@@ -16,7 +16,8 @@ direction, and re-emits a real, configurable action.
 ## Requirements
 
 - Magisk or APatch (duh)
-- Your ring must show up in `getevent -l` (tested with JX-11; other 
+- Your ring must show up in `getevent -l` (You can test the name the device shows up as first
+  ;tested with JX-11; other 
   identically-designed AliExpress ring clickers likely share the same 
   protocol — check the device name matches or update it in the WebUI)
 
