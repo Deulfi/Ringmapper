@@ -1,5 +1,17 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
+}
+
+// Release signing comes from android/keystore.properties (git-ignored):
+//   storeFile=/path/to/ringmapper-release.jks
+//   storePassword=...   keyAlias=ringmapper   keyPassword=...
+// Without that file, release builds fall back to the debug key (fine for forks/testing,
+// but users can't update between APKs signed with different keys).
+val ks = Properties().apply {
+    val f = rootProject.file("keystore.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
 }
 
 android {
@@ -24,10 +36,19 @@ android {
     // Android extract it to nativeLibraryDir, where the privileged side copies it from.
     packaging { jniLibs { useLegacyPackaging = true } }
 
+    signingConfigs {
+        if (!ks.isEmpty) create("release") {
+            storeFile = file(ks.getProperty("storeFile"))
+            storePassword = ks.getProperty("storePassword")
+            keyAlias = ks.getProperty("keyAlias")
+            keyPassword = ks.getProperty("keyPassword")
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
     }
 

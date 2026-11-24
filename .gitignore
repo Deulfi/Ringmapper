@@ -6,3 +6,6 @@ android/local.properties
 android/app/src/main/jniLibs/
 *.zip
 dist/
+android/keystore.properties
+*.jks
+*.keystore

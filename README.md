@@ -118,8 +118,13 @@ kill -HUP <pid>                          # reload the config
 
 ```
 daemon/build.sh                 # NDK -> module/ring_mapper   (NDK=/path/to/ndk)
-cd android && ./gradlew assembleDebug   # JDK 17 + Android SDK; bundles module/ring_mapper
+cd android && ./gradlew assembleRelease   # JDK 17 + Android SDK; bundles module/ring_mapper
 ```
+
+Release signing reads `android/keystore.properties` (not in git; keys `storeFile`,
+`storePassword`, `keyAlias`, `keyPassword`). Without it, the APK is signed
+with your local debug key. That's fine for your own builds, but it can't
+update an official release in place.
 
 The repo layout:
 - `daemon/`: the C program;
