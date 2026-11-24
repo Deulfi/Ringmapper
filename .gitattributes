@@ -3,7 +3,7 @@
 *.c text eol=lf
 config.txt text eol=lf
 module.prop text eol=lf
-webroot/** text eol=lf
+module/webroot/** text eol=lf
 ring_mapper binary
 android-ndk-*/ export-ignore
 *.kt text eol=lf

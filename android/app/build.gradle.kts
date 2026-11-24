@@ -42,9 +42,9 @@ dependencies {
     implementation("dev.rikka.shizuku:provider:13.1.5")
 }
 
-// Copy the NDK-built daemon (../../ring_mapper, built by ../../build.sh) into jniLibs.
+// Copy the NDK-built daemon (module/ring_mapper, built by daemon/build.sh) into jniLibs.
 val copyDaemon by tasks.registering(Copy::class) {
-    from(rootProject.file("../ring_mapper"))
+    from(rootProject.file("../module/ring_mapper"))
     into(layout.projectDirectory.dir("src/main/jniLibs/arm64-v8a"))
     rename { "libringmapper.so" }
 }
