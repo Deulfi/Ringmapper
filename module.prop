@@ -1,6 +1,6 @@
 id=ring_mapper
 name=Ring Mapper
-version=v1.0.3
-versionCode=1
+version=v1.1.0
+versionCode=3
 author=deulfi
 description=Remaps Bluetooth ring swipes to configurable actions

@@ -1,8 +1,8 @@
 name=JX-11
 up=scroll_up
 down=scroll_down
-left=page_prev
-right=page_next
+left=dpad_left
+right=dpad_right
 up_mult=1
 down_mult=1
 left_mult=1

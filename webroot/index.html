@@ -22,15 +22,19 @@ button{margin-top:20px;width:100%;padding:12px;font-size:16px;border:none;border
 <label>Device name (from getevent)<input id="name" value="JX-11"></label>
 
 <label>Swipe Up<select id="up"></select></label>
+<label id="up_key_wrap" style="display:none">Up custom Android keycode<input id="up_key" type="number" min="1" max="999" value="22"></label>
 <label>Up multiplier<input id="up_mult" type="number" min="-50" max="50" value="1"></label>
 
 <label>Swipe Down<select id="down"></select></label>
+<label id="down_key_wrap" style="display:none">Down custom Android keycode<input id="down_key" type="number" min="1" max="999" value="22"></label>
 <label>Down multiplier<input id="down_mult" type="number" min="-50" max="50" value="1"></label>
 
 <label>Swipe Left<select id="left"></select></label>
+<label id="left_key_wrap" style="display:none">Left custom Android keycode<input id="left_key" type="number" min="1" max="999" value="22"></label>
 <label>Left multiplier<input id="left_mult" type="number" min="-50" max="50" value="1"></label>
 
 <label>Swipe Right<select id="right"></select></label>
+<label id="right_key_wrap" style="display:none">Right custom Android keycode<input id="right_key" type="number" min="1" max="999" value="22"></label>
 <label>Right multiplier<input id="right_mult" type="number" min="-50" max="50" value="1"></label>
 
 <label>Swipe speed/intensity (ms) — lower = faster fling, higher = slower/shorter<input id="swipe_duration_ms" type="number" min="10" max="2000" value="200"></label>
@@ -39,15 +43,51 @@ button{margin-top:20px;width:100%;padding:12px;font-size:16px;border:none;border
 <p id="status"></p>
 
 <script>
-const ACTIONS = ["scroll_up","scroll_down","dpad_up","dpad_down","page_up","page_down","page_prev","page_next","swipe","none"];
-const CFG = "/data/adb/modules/ring_mapper/config.txt";
+const ACTIONS = [
+  ["scroll_up","Scroll up"],
+  ["scroll_down","Scroll down"],
+  ["swipe","Touch swipe"],
+  ["dpad_up","D-pad up"],
+  ["dpad_down","D-pad down"],
+  ["dpad_left","D-pad left"],
+  ["dpad_right","D-pad right"],
+  ["page_up","Page up"],
+  ["page_down","Page down"],
+  ["volume_up","Volume up"],
+  ["volume_down","Volume down"],
+  ["media_prev","Media previous"],
+  ["media_next","Media next"],
+  ["media_play_pause","Media play/pause"],
+  ["space","Space"],
+  ["enter","Enter"],
+  ["back","Back"],
+  ["custom","Custom keycode…"],
+  ["none","None"],
+];
+const LEGACY = { page_prev: "dpad_left", page_next: "dpad_right" };
+const MOD = "/data/adb/modules/ring_mapper";
+const BIN = `${MOD}/ring_mapper`;
+const CFG = `${MOD}/config.txt`;
+
+function toggleKey(d){
+  document.getElementById(d+"_key_wrap").style.display =
+    document.getElementById(d).value === "custom" ? "block" : "none";
+}
 
 function populate(cur){
   ["up","down","left","right"].forEach(d=>{
+    let v = LEGACY[cur[d]] || cur[d] || "none";
+    if (v.startsWith("key:")) { document.getElementById(d+"_key").value = v.slice(4); v = "custom"; }
     const sel = document.getElementById(d);
-    sel.innerHTML = ACTIONS.map(a=>`<option value="${a}" ${cur[d]===a?"selected":""}>${a}</option>`).join("");
-    sel.onchange = () => { document.getElementById(d+"_mult").value = 1; };
+    sel.innerHTML = ACTIONS.map(([a,label])=>`<option value="${a}" ${v===a?"selected":""}>${label}</option>`).join("");
+    sel.onchange = () => { document.getElementById(d+"_mult").value = 1; toggleKey(d); };
+    toggleKey(d);
   });
+}
+
+function actionOf(d){
+  const v = document.getElementById(d).value;
+  return v === "custom" ? "key:" + clamp(d+"_key", 1, 999) : v;
 }
 
 function loadConfig(){ ksu.exec(`cat ${CFG}`, "{}", "onLoad"); }
@@ -73,10 +113,10 @@ function clamp(id, min, max){
 
 function applyConfig(){
   const name = document.getElementById("name").value.trim();
-  const up = document.getElementById("up").value;
-  const down = document.getElementById("down").value;
-  const left = document.getElementById("left").value;
-  const right = document.getElementById("right").value;
+  const up = actionOf("up");
+  const down = actionOf("down");
+  const left = actionOf("left");
+  const right = actionOf("right");
 
   const up_mult = clamp("up_mult", -50, 50);
   const down_mult = clamp("down_mult", -50, 50);
@@ -88,15 +128,18 @@ function applyConfig(){
     + `up_mult=${up_mult}\ndown_mult=${down_mult}\nleft_mult=${left_mult}\nright_mult=${right_mult}\n`
     + `swipe_duration_ms=${swipe_duration_ms}\n`;
 
-  const cmd = `cat > ${CFG} << 'EOF'\n${body}EOF\npkill -f /ring_mapper/ring_mapper; exit 0`;
+  // running daemon: reload config (SIGHUP); otherwise start it detached
+  const cmd = `cat > ${CFG} << 'EOF'\n${body}EOF\n`
+    + `if pkill -HUP -f '^${BIN}'; then echo reloaded; else ${BIN} -d -l ${MOD}/log.txt ${CFG}; echo "started $?"; fi`;
   ksu.exec(cmd, "{}", "onApply");
-  ksu.exec("/data/adb/modules/ring_mapper/ring_mapper >/dev/null 2>&1 &", "{}", "onStart");
 }
-function onApply(errno){
-  document.getElementById("status").innerText = "Applied.";
-}
-function onStart(errno){
-  document.getElementById("status").innerText = "Started.";
+function onApply(errno, stdout){
+  const out = (stdout || "").trim();
+  document.getElementById("status").innerText =
+    out === "reloaded" ? "Applied (config reloaded)." :
+    out === "started 0" ? "Applied and started." :
+    out === "started 4" ? "Another ring_mapper is already running (the app?). Stop it there first." :
+    "Applied. " + out;
 }
 function stopDaemon(){
   ksu.exec("pkill -f /ring_mapper/service.sh; pkill -f /ring_mapper/ring_mapper; exit 0", "{}", "onStop");

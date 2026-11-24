@@ -4,12 +4,16 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <dirent.h>
 #include <signal.h>
+#include <sys/inotify.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/ioctl.h>
 #include <linux/input.h>
 #include <linux/uinput.h>
 
-#define CONFIG_PATH "/data/adb/modules/ring_mapper/config.txt"
+#define CONFIG_PATH "/data/adb/modules/ring_mapper/config.txt" /* default; override with argv[1] */
 
 int SCREEN_W = 1080, SCREEN_H = 2400; /* fallback if detection fails */
 
@@ -19,7 +23,7 @@ typedef struct {
     int swipe_duration_ms;
 } config_t;
 
-int load_config(config_t *cfg) {
+int load_config(config_t *cfg, const char *path) {
     memset(cfg, 0, sizeof(*cfg));
     strcpy(cfg->name, "JX-11");
     strcpy(cfg->up, "none"); strcpy(cfg->down, "none");
@@ -27,7 +31,7 @@ int load_config(config_t *cfg) {
     cfg->up_mult = cfg->down_mult = cfg->left_mult = cfg->right_mult = 1;
     cfg->swipe_duration_ms = 200;
 
-    FILE *f = fopen(CONFIG_PATH, "r");
+    FILE *f = fopen(path, "r");
     if (!f) return -1;
     char line[256];
     while (fgets(line, sizeof(line), f)) {
@@ -51,33 +55,36 @@ int load_config(config_t *cfg) {
     return 0;
 }
 
+/* Scan /dev/input/event* and match the device name via EVIOCGNAME.
+   Works as root and as the adb/Shizuku shell user (input group), unlike
+   /proc/bus/input/devices, which shell may not read on newer Android. */
 int find_device(const char *name, char *out_path, size_t out_len) {
-    FILE *f = fopen("/proc/bus/input/devices", "r");
-    if (!f) return -1;
-    char line[512], search[128];
-    int found = 0;
-    snprintf(search, sizeof(search), "N: Name=\"%s\"", name);
-    while (fgets(line, sizeof(line), f)) {
-        if (strstr(line, search)) found = 1;
-        if (found && strncmp(line, "H: Handlers=", 12) == 0) {
-            char *ev = strstr(line, "event");
-            if (ev) {
-                int num; sscanf(ev, "event%d", &num);
-                snprintf(out_path, out_len, "/dev/input/event%d", num);
-                fclose(f);
-                return 0;
-            }
+    DIR *d = opendir("/dev/input");
+    if (!d) return -1;
+    struct dirent *e;
+    int rc = -1;
+    while ((e = readdir(d))) {
+        if (strncmp(e->d_name, "event", 5)) continue;
+        char path[64], devname[256] = {0};
+        snprintf(path, sizeof(path), "/dev/input/%s", e->d_name);
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) continue;
+        int ok = ioctl(fd, EVIOCGNAME(sizeof(devname) - 1), devname) >= 0;
+        close(fd);
+        if (ok && !strcmp(devname, name)) {
+            snprintf(out_path, out_len, "%s", path);
+            rc = 0;
+            break;
         }
-        if (line[0] == '\n') found = 0;
     }
-    fclose(f);
-    return -1;
+    closedir(d);
+    return rc;
 }
 
 void detect_screen_size(void) {
     FILE *fp = popen("wm size", "r");
     if (!fp) return;
-    char line[128], phys[64];
+    char line[128];
     while (fgets(line, sizeof(line), fp)) {
         int w, h;
         if (sscanf(line, "Physical size: %dx%d", &w, &h) == 2) {
@@ -89,7 +96,9 @@ void detect_screen_size(void) {
 
 /* returns 1 if currently landscape, 0 if portrait */
 int is_landscape(void) {
-    FILE *fp = popen("dumpsys window | grep -m1 mCurrentRotation", "r");
+    /* "displays" section only (small, fast); no grep -m1, so dumpsys never hits a
+       closed pipe and never prints "Broken pipe" into our log */
+    FILE *fp = popen("dumpsys window displays 2>/dev/null | grep mCurrentRotation", "r");
     if (!fp) return 0;
     char line[128]; int landscape = 0;
     if (fgets(line, sizeof(line), fp)) {
@@ -107,7 +116,7 @@ int needs_pointer(config_t *cfg) {
 }
 
 int setup_uinput(void) {
-    int ui = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+    int ui = open("/dev/uinput", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
     if (ui < 0) return -1;
     ioctl(ui, UI_SET_EVBIT, EV_KEY);
     ioctl(ui, UI_SET_KEYBIT, BTN_LEFT);
@@ -133,15 +142,79 @@ void emit(int ui, int type, int code, int value) {
     write(ui, &syn, sizeof(syn));
 }
 
-void do_action(int ui, const char *action) {
-    if (!strcmp(action, "scroll_up")) emit(ui, EV_REL, REL_WHEEL, 1);
-    else if (!strcmp(action, "scroll_down")) emit(ui, EV_REL, REL_WHEEL, -1);
-    else if (!strcmp(action, "dpad_up")) system("input keyevent 19");
-    else if (!strcmp(action, "dpad_down")) system("input keyevent 20");
-    else if (!strcmp(action, "page_up")) system("input keyevent 92");
-    else if (!strcmp(action, "page_down")) system("input keyevent 93");
-    else if (!strcmp(action, "page_prev")) system("input keyevent 21");
-    else if (!strcmp(action, "page_next")) system("input keyevent 22");
+/* action name -> Linux key code for the virtual "ring-keys" device.
+   Android maps these through Generic.kl to the listed KEYCODE_*.
+   Only non-letter keys are declared, so Android does NOT treat the device
+   as a hardware keyboard (the on-screen keyboard keeps working). */
+static const struct { const char *name; int linux_key; } KEY_ACTIONS[] = {
+    { "dpad_up",          KEY_UP },           /* DPAD_UP */
+    { "dpad_down",        KEY_DOWN },         /* DPAD_DOWN */
+    { "dpad_left",        KEY_LEFT },         /* DPAD_LEFT  - prev chapter/page in many readers */
+    { "dpad_right",       KEY_RIGHT },        /* DPAD_RIGHT - next chapter/page in many readers */
+    { "page_prev",        KEY_LEFT },         /* legacy alias of dpad_left */
+    { "page_next",        KEY_RIGHT },        /* legacy alias of dpad_right */
+    { "page_up",          KEY_PAGEUP },       /* PAGE_UP */
+    { "page_down",        KEY_PAGEDOWN },     /* PAGE_DOWN */
+    { "volume_up",        KEY_VOLUMEUP },     /* page turn in Moon+/Librera/ReadEra etc. */
+    { "volume_down",      KEY_VOLUMEDOWN },
+    { "media_prev",       KEY_PREVIOUSSONG }, /* MEDIA_PREVIOUS - audiobook prev chapter */
+    { "media_next",       KEY_NEXTSONG },     /* MEDIA_NEXT     - audiobook next chapter */
+    { "media_play_pause", KEY_PLAYPAUSE },
+    { "space",            KEY_SPACE },
+    { "enter",            KEY_ENTER },
+    { "back",             KEY_BACK },
+    { NULL, 0 }
+};
+
+static int linux_key_for(const char *action) {
+    for (int i = 0; KEY_ACTIONS[i].name; i++)
+        if (!strcmp(action, KEY_ACTIONS[i].name)) return KEY_ACTIONS[i].linux_key;
+    return 0;
+}
+
+int needs_keys(config_t *cfg) {
+    const char *vals[4] = {cfg->up, cfg->down, cfg->left, cfg->right};
+    for (int i = 0; i < 4; i++) if (linux_key_for(vals[i])) return 1;
+    return 0;
+}
+
+int setup_uinput_keys(void) {
+    int ui = open("/dev/uinput", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    if (ui < 0) return -1;
+    ioctl(ui, UI_SET_EVBIT, EV_KEY);
+    for (int i = 0; KEY_ACTIONS[i].name; i++) ioctl(ui, UI_SET_KEYBIT, KEY_ACTIONS[i].linux_key);
+
+    struct uinput_setup us; memset(&us, 0, sizeof(us));
+    us.id.bustype = BUS_VIRTUAL; us.id.vendor = 0x1234; us.id.product = 0x5679; us.id.version = 1;
+    strcpy(us.name, "ring-keys");
+    ioctl(ui, UI_DEV_SETUP, &us);
+    ioctl(ui, UI_DEV_CREATE);
+    return ui;
+}
+
+/* custom Android keycodes have no fixed Linux key, so they still use `input` */
+static void send_android_keycode(int keycode) {
+    char cmd[48];
+    snprintf(cmd, sizeof(cmd), "input keyevent %d", keycode);
+    system(cmd);
+}
+
+void do_action(int ui_wheel, int ui_keys, const char *action) {
+    if (!strcmp(action, "scroll_up"))   { if (ui_wheel >= 0) emit(ui_wheel, EV_REL, REL_WHEEL, 1);  return; }
+    if (!strcmp(action, "scroll_down")) { if (ui_wheel >= 0) emit(ui_wheel, EV_REL, REL_WHEEL, -1); return; }
+
+    /* custom keycode: "key:<android keycode>", e.g. key:93 */
+    if (!strncmp(action, "key:", 4)) {
+        int kc = atoi(action + 4);
+        if (kc > 0 && kc < 1000) send_android_keycode(kc);
+        return;
+    }
+
+    int k = linux_key_for(action);
+    if (k && ui_keys >= 0) {
+        emit(ui_keys, EV_KEY, k, 1);
+        emit(ui_keys, EV_KEY, k, 0);
+    }
 }
 
 void do_touch_swipe(const char *direction, int amount, int duration_ms) {
@@ -170,67 +243,205 @@ void do_touch_swipe(const char *direction, int amount, int duration_ms) {
     system(cmd);
 }
 
-void schedule_cursor_park(int ui) {
-    signal(SIGCHLD, SIG_IGN);
-    pid_t pid = fork();
-    if (pid == 0) {
-        usleep(300000);
-        emit(ui, EV_REL, REL_X, -999);
-        emit(ui, EV_REL, REL_Y, 99);
-        _exit(0);
-    }
+/* move the (unavoidable) pointer to the bottom-left corner;
+   the short wait lets Android register the new uinput device first */
+void park_cursor(int ui) {
+    usleep(300000);
+    emit(ui, EV_REL, REL_X, -999);
+    emit(ui, EV_REL, REL_Y, 99);
 }
 
-int main(void) {
+static void destroy_uinput(int *ui) {
+    if (*ui >= 0) { ioctl(*ui, UI_DEV_DESTROY, 0); close(*ui); *ui = -1; }
+}
+
+static volatile sig_atomic_t g_reload = 0, g_quit = 0;
+static void on_signal(int sig) { if (sig == SIGHUP) g_reload = 1; else g_quit = 1; }
+
+/* Single instance across root and shell: abstract unix socket, released
+   automatically by the kernel when the process dies. */
+static int take_instance_lock(void) {
+    int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (s < 0) return -1;
+    struct sockaddr_un a; memset(&a, 0, sizeof(a));
+    a.sun_family = AF_UNIX;
+    const char *nm = "ring_mapper.lock";
+    memcpy(a.sun_path + 1, nm, strlen(nm));      /* sun_path[0] = 0 -> abstract namespace */
+    if (bind(s, (struct sockaddr *)&a, sizeof(sa_family_t) + 1 + strlen(nm)) < 0) { close(s); return -1; }
+    return s;
+}
+
+/* Block (0% CPU) until something changes in /dev/input, or a signal arrives. */
+static void wait_for_input_change(void) {
+    int in = inotify_init1(IN_CLOEXEC);
+    if (in < 0) { sleep(5); return; }
+    if (inotify_add_watch(in, "/dev/input", IN_CREATE | IN_ATTRIB) < 0) { close(in); sleep(5); return; }
+    char buf[512];
+    read(in, buf, sizeof(buf));                  /* returns on event or EINTR */
+    close(in);
+    usleep(300000);                              /* let ueventd set owner + SELinux label */
+}
+
+static void list_devices(void) {
+    DIR *d = opendir("/dev/input");
+    if (!d) { perror("/dev/input"); return; }
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (strncmp(e->d_name, "event", 5)) continue;
+        char path[64], nm[256] = {0};
+        snprintf(path, sizeof(path), "/dev/input/%s", e->d_name);
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) continue;
+        if (ioctl(fd, EVIOCGNAME(sizeof(nm) - 1), nm) >= 0) printf("%s\t%s\n", path, nm);
+        close(fd);
+    }
+    closedir(d);
+}
+
+static void usage(void) {
+    fprintf(stderr,
+        "usage: ring_mapper [-d] [-l logfile] [config]\n"
+        "       ring_mapper --list          list input devices (path<TAB>name)\n"
+        "  -d   detach: run in background in its own session\n"
+        "  signals: SIGHUP = reload config, SIGTERM = quit\n"
+        "  exit codes: 1 config unreadable, 4 already running\n");
+}
+
+int main(int argc, char **argv) {
+    const char *config_path = CONFIG_PATH, *log_path = NULL;
+    int detach = 0;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--list")) { list_devices(); return 0; }
+        else if (!strcmp(argv[i], "-d")) detach = 1;
+        else if (!strcmp(argv[i], "-l") && i + 1 < argc) log_path = argv[++i];
+        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { usage(); return 0; }
+        else config_path = argv[i];
+    }
+
     config_t cfg;
-    if (load_config(&cfg) < 0) { fprintf(stderr, "ring_mapper: cannot read config %s\n", CONFIG_PATH); return 1; }
-    detect_screen_size();
+    if (load_config(&cfg, config_path) < 0) { fprintf(stderr, "ring_mapper: cannot read config %s\n", config_path); return 1; }
 
-    char dev_path[64];
-    if (find_device(cfg.name, dev_path, sizeof(dev_path)) < 0) {
-        fprintf(stderr, "ring_mapper: no input device found with name \"%s\"\n", cfg.name);
-        return 2;
-    }
+    int lock = take_instance_lock();
+    if (lock < 0) { fprintf(stderr, "ring_mapper: already running\n"); return 4; }
 
-    int fd = open(dev_path, O_RDONLY);
-    if (fd < 0) { fprintf(stderr, "ring_mapper: cannot open %s: %s\n", dev_path, strerror(errno)); return 3; }
-    ioctl(fd, EVIOCGRAB, 1);
-
-    int ui_wheel = needs_pointer(&cfg) ? setup_uinput() : -1;
-    if (ui_wheel >= 0) schedule_cursor_park(ui_wheel);
-
-    int start_x = -1, last_x = -1, start_y = -1, last_y = -1;
-    struct input_event ev;
-
-    while (read(fd, &ev, sizeof(ev)) == sizeof(ev)) {
-        if (ev.type == EV_ABS && (ev.code == ABS_X || ev.code == ABS_MT_POSITION_X)) {
-            last_x = ev.value; if (start_x < 0) start_x = last_x;
-        } else if (ev.type == EV_ABS && (ev.code == ABS_Y || ev.code == ABS_MT_POSITION_Y)) {
-            last_y = ev.value; if (start_y < 0) start_y = last_y;
-        } else if (ev.type == EV_KEY && ev.code == BTN_TOUCH && ev.value == 0) {
-            int dx = (start_x >= 0) ? last_x - start_x : 0;
-            int dy = (start_y >= 0) ? last_y - start_y : 0;
-            const char *action = NULL, *direction = NULL; int mult = 1;
-
-            if (abs(dy) > abs(dx) && abs(dy) > 30) {
-                if (dy > 0) { action = cfg.up; mult = cfg.up_mult; direction = "up"; }
-                else        { action = cfg.down; mult = cfg.down_mult; direction = "down"; }
-            } else if (abs(dx) > 30) {
-                if (dx > 0) { action = cfg.left; mult = cfg.left_mult; direction = "left"; }
-                else        { action = cfg.right; mult = cfg.right_mult; direction = "right"; }
-            }
-            if (action) {
-                if (!strcmp(action, "swipe")) {
-                    do_touch_swipe(direction, mult, cfg.swipe_duration_ms);
-                } else {
-                    for (int i = 0; i < mult; i++) do_action(ui_wheel, action);
-                }
-            }
-            start_x = last_x = start_y = last_y = -1;
+    if (detach) {
+        pid_t pid = fork();
+        if (pid < 0) return 5;
+        if (pid > 0) _exit(0);                   /* caller returns immediately */
+        setsid();
+        signal(SIGHUP, SIG_IGN);
+        if (fork() > 0) _exit(0);                /* not a session leader -> no controlling tty */
+        int nul = open("/dev/null", O_RDWR);
+        if (nul >= 0) {
+            dup2(nul, 0);
+            if (!log_path) { dup2(nul, 1); dup2(nul, 2); }
+            if (nul > 2) close(nul);
         }
+        chdir("/");
+    }
+    if (log_path) {
+        int lf = open(log_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (lf >= 0) { dup2(lf, 1); dup2(lf, 2); close(lf); }
+    }
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IOLBF, 0);
+
+    /* no SA_RESTART: a blocking read() returns EINTR so we can reload/quit */
+    struct sigaction sa; memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_signal;
+    sigaction(SIGHUP, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGINT, &sa, NULL);
+    signal(SIGPIPE, SIG_IGN);
+
+    detect_screen_size();
+    fprintf(stderr, "ring_mapper: started (pid %d, uid %d, config %s)\n", getpid(), getuid(), config_path);
+
+    int ui_wheel = -1, ui_keys = -1;
+    int need_setup = 1, waiting_logged = 0;
+
+    while (!g_quit) {
+        if (g_reload) {
+            g_reload = 0;
+            if (load_config(&cfg, config_path) < 0) fprintf(stderr, "ring_mapper: reload failed, keeping old config\n");
+            else fprintf(stderr, "ring_mapper: config reloaded\n");
+            destroy_uinput(&ui_wheel);
+            destroy_uinput(&ui_keys);
+            need_setup = 1;
+        }
+        if (need_setup) {
+            if (needs_pointer(&cfg)) {
+                ui_wheel = setup_uinput();
+                if (ui_wheel >= 0) park_cursor(ui_wheel);
+                else fprintf(stderr, "ring_mapper: cannot create scroll device: %s\n", strerror(errno));
+            }
+            if (needs_keys(&cfg)) {
+                ui_keys = setup_uinput_keys();
+                if (ui_keys < 0) fprintf(stderr, "ring_mapper: cannot create key device: %s\n", strerror(errno));
+            }
+            need_setup = 0;
+        }
+
+        char dev_path[64];
+        if (find_device(cfg.name, dev_path, sizeof(dev_path)) < 0) {
+            if (!waiting_logged) { fprintf(stderr, "ring_mapper: waiting for \"%s\"\n", cfg.name); waiting_logged = 1; }
+            wait_for_input_change();
+            continue;
+        }
+        waiting_logged = 0;
+
+        int fd = open(dev_path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+            fprintf(stderr, "ring_mapper: cannot open %s: %s\n", dev_path, strerror(errno));
+            wait_for_input_change();
+            continue;
+        }
+        if (ioctl(fd, EVIOCGRAB, 1) < 0)
+            fprintf(stderr, "ring_mapper: warning: cannot grab %s: %s\n", dev_path, strerror(errno));
+        fprintf(stderr, "ring_mapper: connected %s\n", dev_path);
+
+        int start_x = -1, last_x = -1, start_y = -1, last_y = -1;
+        struct input_event ev;
+        for (;;) {
+            ssize_t n = read(fd, &ev, sizeof(ev));
+            if (n != (ssize_t)sizeof(ev)) {
+                if (n < 0 && errno == EINTR && !g_quit && !g_reload) continue;
+                break;                           /* ENODEV = ring gone, or reload/quit */
+            }
+            if (ev.type == EV_ABS && (ev.code == ABS_X || ev.code == ABS_MT_POSITION_X)) {
+                last_x = ev.value; if (start_x < 0) start_x = last_x;
+            } else if (ev.type == EV_ABS && (ev.code == ABS_Y || ev.code == ABS_MT_POSITION_Y)) {
+                last_y = ev.value; if (start_y < 0) start_y = last_y;
+            } else if (ev.type == EV_KEY && ev.code == BTN_TOUCH && ev.value == 0) {
+                int dx = (start_x >= 0) ? last_x - start_x : 0;
+                int dy = (start_y >= 0) ? last_y - start_y : 0;
+                const char *action = NULL, *direction = NULL; int mult = 1;
+
+                if (abs(dy) > abs(dx) && abs(dy) > 30) {
+                    if (dy > 0) { action = cfg.up; mult = cfg.up_mult; direction = "up"; }
+                    else        { action = cfg.down; mult = cfg.down_mult; direction = "down"; }
+                } else if (abs(dx) > 30) {
+                    if (dx > 0) { action = cfg.left; mult = cfg.left_mult; direction = "left"; }
+                    else        { action = cfg.right; mult = cfg.right_mult; direction = "right"; }
+                }
+                if (action) {
+                    if (!strcmp(action, "swipe")) {
+                        do_touch_swipe(direction, mult, cfg.swipe_duration_ms);
+                    } else {
+                        for (int i = 0; i < mult; i++) do_action(ui_wheel, ui_keys, action);
+                    }
+                }
+                start_x = last_x = start_y = last_y = -1;
+            }
+        }
+        ioctl(fd, EVIOCGRAB, 0);
+        close(fd);
+        if (!g_quit && !g_reload) fprintf(stderr, "ring_mapper: disconnected, waiting\n");
     }
 
-    ioctl(fd, EVIOCGRAB, 0); close(fd);
-    if (ui_wheel >= 0) { ioctl(ui_wheel, UI_DEV_DESTROY); close(ui_wheel); }
+    destroy_uinput(&ui_wheel);
+    destroy_uinput(&ui_keys);
+    close(lock);
+    fprintf(stderr, "ring_mapper: stopped\n");
     return 0;
 }

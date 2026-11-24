@@ -1,0 +1,8 @@
+# files that run or are read on Android must use LF
+*.sh text eol=lf
+*.c text eol=lf
+config.txt text eol=lf
+module.prop text eol=lf
+webroot/** text eol=lf
+ring_mapper binary
+android-ndk-*/ export-ignore
