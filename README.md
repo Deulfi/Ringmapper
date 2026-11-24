@@ -19,10 +19,10 @@ the action you picked.
 
 ## Requirements
 
-- Android 8.0 or newer, 64-bit ARM (practically every phone from the last years)
+- Android 8.0 or newer, 64-bit ARM
 - One of these:
   - **Shizuku**: no root. You start it with Wireless debugging (Android 11+) or once from a PC over adb.
-  - **Root**: Magisk, APatch or KernelSU. The app uses `su`.
+  - **Root**: Magisk, APatch or KernelSU.
 - The ring paired over Bluetooth.
 
 ## Install & set up
@@ -35,16 +35,14 @@ the action you picked.
    - **Ring device name**: tap **Pick…** and choose your ring (`JX-11` by default).
    - Choose an action for each swipe direction.
    - Tap **Apply & start**.
-4. Done. You can close the app. A tiny background process (about 0.5 MB RAM,
-   0% CPU while idle) keeps handling the ring, even when it disconnects and
-   reconnects.
+4. Done. You can close the app. A tiny background process keeps handling the
+   ring, even when it disconnects and reconnects.
 
 ### After a reboot
 
 The background process does not survive a reboot.
 
-- **Root:** tick **Start at boot**. It starts on its own about a minute after
-  boot, once Android reports boot complete.
+- **Root:** tick **Start at boot**.
 - **Shizuku:** Shizuku itself has to be started again first. Then open Ring
   Mapper and tap **Apply & start**. If your Shizuku starts at boot, **Start at
   boot** works too.
@@ -74,9 +72,6 @@ The **multiplier** repeats the action (for example 3 = three scroll steps per sw
 | "Another ring_mapper is already running" | The Magisk/APatch module (or an earlier start) is already running it. Stop that one first. |
 | Nothing happens with Shizuku on your phone | Some vendor ROMs (Samsung, Xiaomi stock…) may block the shell user from input devices. Use root, and please open an issue. |
 
-Tested on a Xiaomi Mi 11 Lite 5G with LineageOS 23.2 (Android 16), both with
-Shizuku and with root.
-
 ## Alternative: Magisk / APatch / KernelSU module
 
 If you prefer a root module over the app, [`module/`](module) contains one. It
@@ -88,49 +83,16 @@ app at the same time: only one of them will get the ring.
 
 ## How it works
 
-A small C program (`daemon/ring_mapper.c`, 17 KB):
-
-1. finds the ring by name among `/dev/input/event*` and grabs it exclusively,
-   so Android no longer sees its broken gestures;
-2. decodes each swipe's direction from the raw touch coordinates;
-3. sends the chosen action through its own virtual input devices
-   (`ring-keys` for keys, `ring-scroll-wheel` for scrolling). Touch swipes
-   and custom keycodes use Android's `input` command.
-
-It sleeps in the kernel while idle and waits for the ring with inotify, so it
-uses no CPU. The app only copies the program to `/data/local/tmp/ringmapper/`,
-writes the config, starts it, and then gets out of the way.
-
-**Why no root is needed:** the shell user (which Shizuku and `adb shell` run
-as) is allowed by stock Android to read input devices and create virtual ones
-(`input`/`uhid` groups, standard SELinux policy). Only that user, not normal
-apps, can do this, which is why remapper apps can't see the ring.
-
-Command line, for tinkering over `adb shell`:
-
-```
-ring_mapper [-d] [-l logfile] [config]   # -d = run detached in the background
-ring_mapper --list                       # list input devices
-kill -HUP <pid>                          # reload the config
-```
+A small C program reads the ring's raw input, works out the swipe direction,
+and sends the chosen action through its own virtual input devices. The app
+just configures and starts it.
 
 ## Building from source
 
 ```
-daemon/build.sh                 # NDK -> module/ring_mapper   (NDK=/path/to/ndk)
-cd android && ./gradlew assembleRelease   # JDK 17 + Android SDK; bundles module/ring_mapper
+daemon/build.sh                          # needs the Android NDK (NDK=/path/to/ndk)
+cd android && ./gradlew assembleRelease  # needs JDK 17 + Android SDK
 ```
-
-Release signing reads `android/keystore.properties` (not in git; keys `storeFile`,
-`storePassword`, `keyAlias`, `keyPassword`). Without it, the APK is signed
-with your local debug key. That's fine for your own builds, but it can't
-update an official release in place.
-
-The repo layout:
-- `daemon/`: the C program;
-- `android/`: the app;
-- `module/`: the root module (with the prebuilt program);
-- `docs/`: the icon in Lawnicons format.
 
 ## License
 
