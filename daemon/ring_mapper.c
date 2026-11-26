@@ -397,7 +397,8 @@ void do_alt_swipe(int ui, int rot, const char *direction, int amount, int durati
    as a smooth curve (distance ~ t^2) sampled every 8 ms, lifted right after
    the last sample. Measured: same result every time, and more distance or a
    lower speed value always means a longer fling.
-   Length: multiplier x 1/24 of the long screen side. Speed setting: the flick's duration.
+   Length: multiplier x 1/24 of the long screen side (75% of that in landscape).
+   Speed setting: the flick's duration.
    Direction as with the bare ring: the finger on screen moves the way it
    moved on the ring. */
 static long now_us(void) {
@@ -410,10 +411,13 @@ void do_ring_swipe(int ui, int rot, const char *direction, int amount, int durat
     int w = SCREEN_W, h = SCREEN_H;
     if (rot & 1) { int t = w; w = h; h = t; }
 
-    /* length from the long screen side in both orientations, so the flick
-       (and its fling) is the same in landscape as in portrait */
+    /* Length from the long screen side, so it doesn't depend on orientation,
+       then 75% in landscape: the visible page is much shorter there, so the
+       same scroll would feel too far. One setting then suits both. */
     int cx = w / 2, cy = h / 2;
-    int delta = (amount * (SCREEN_W > SCREEN_H ? SCREEN_W : SCREEN_H)) / 24, deltax = delta;
+    int delta = (amount * (SCREEN_W > SCREEN_H ? SCREEN_W : SCREEN_H)) / 24;
+    if (rot & 1) delta = delta * 3 / 4;
+    int deltax = delta;
     int x0 = cx, y0 = cy, x1 = cx, y1 = cy;
     if (!strcmp(direction, "up"))         { y0 = cy - delta / 2; y1 = cy + delta / 2; }
     else if (!strcmp(direction, "down"))  { y0 = cy + delta / 2; y1 = cy - delta / 2; }
@@ -423,7 +427,7 @@ void do_ring_swipe(int ui, int rot, const char *direction, int amount, int durat
     y0 = CLAMP(y0, h - 1); y1 = CLAMP(y1, h - 1);
 
     if (duration_ms < 16) duration_ms = 16;
-    int n = duration_ms / 8 + 1;                 /* one sample per 8 ms */
+    int n = duration_ms / 8 + 1;                 /* one sample per 8 ms (4 or 2 ms measured no steadier) */
     static int tid = 0; tid = (tid + 1) & 0xffff;
     long t0 = now_us();
 
