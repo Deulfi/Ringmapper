@@ -69,11 +69,37 @@ the grab, Android would act on the ring's own touches as well as Ring Mapper.
 That's the native behavior you see without Ring Mapper, when the ring
 performs its own swipes on the screen.
 
-**Not tested here:** a side-by-side check that apps receive the ring's touches
-when the grab is released. In one attempt on the Mi (daemon stopped for a few
-seconds), the ring didn't appear in Android's device list at all, probably
-because the ring had just gone to sleep or was reconnecting. That attempt
-proved nothing either way.
+Shown with a fake ring (below): touches that arrive before the daemon's grab
+do reach other readers of the device, which includes Android.
+
+**Not tested here:** that apps scroll or react to the real ring's touches
+when nothing grabs it. With the fake ring and no daemon, two full swipes in
+Settings didn't trigger a back gesture (screen awake). Whether they scrolled
+anything wasn't checked.
+
+## Reconnect: the first swipe after the ring wakes (Mi)
+
+The ring sleeps and reconnects over Bluetooth, so its input device appears
+again. A fake ring was used here: a uinput device with the JX-11's axes,
+replaying the recorded gesture with no X. It drove the real daemon (Alt
+swipe only), with the screen on and unlocked, in Settings, with gesture
+navigation.
+
+- Old daemon (waits a fixed 300 ms after a new device appears, then grabs).
+  The events another reader saw from a swipe starting N ms after the ring
+  appeared: 200 ms → 11 of 11, 250 ms → 9, 300 ms → 4, 350 ms and later → 0.
+  Once (first swipe 300 ms after connect), Settings closed through the back
+  gesture.
+- Fixed daemon (commit 6b5f73d, polls every 5 ms until it can open the
+  ring): 0 events leaked at 30, 100, 200 and 300 ms, as shell and as root, 3
+  runs each. No back gesture. Alt swipes still worked right after a
+  reconnect, in portrait and both landscape rotations.
+- Control: the same listener with the old daemon saw 2–4 events at 30 ms and
+  11 at 100 ms, so the 0s above are real. At 5 ms the listener attaches too
+  late to see anything, so that case is unmeasured.
+
+Why a leaked touch is a back gesture: the ring sends no X, and its
+`ABS_MT_POSITION_X` is 0, so Android puts the touch on the left edge.
 
 ## The ring's own gesture (Mi)
 
@@ -83,7 +109,9 @@ the same pattern every time, whether swiped fast or slow:
 - Ring up: Y goes 350 → 530 in steps of 30 every ~10 ms, then jumps to
   1200 (outside its own 0–1000 range) and lifts. About 45 ms in total.
 - Ring down: Y goes 620 → 470, then jumps to 0.
-- It never sends X, so X stays at its last value (500, the middle).
+- It never sends X. Its `ABS_X` reads 500 (the middle), but its
+  `ABS_MT_POSITION_X`, the one Android's multitouch handling uses, reads 0.
+  Seen with `getevent -p` and in `dumpsys input` (`AbsState`).
 
 ## Things found by testing the virtual touchscreen
 
@@ -98,7 +126,8 @@ These are Alt swipe and Ring swipe, tested on both phones.
   that device (±1 px). Checked with `getevent`: every touch's first frame has
   both X and Y, for mixed sequences in portrait and both landscape
   rotations. On the Mi the old code left Settings through the back gesture,
-  and the fixed code stays.
+  and the fixed code stays. This was one cause of back gestures. The other
+  was the reconnect leak above, which happens with Alt swipe alone.
 - **Rotation.** Android rotates the virtual touchscreen like a built-in one,
   so coordinates are converted from screen to panel orientation. Checked
   with the pointer-location overlay in 0°, 90° and 270° on both phones.
