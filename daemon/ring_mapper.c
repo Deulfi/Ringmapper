@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <time.h>
 #include <dirent.h>
 #include <signal.h>
 #include <sys/inotify.h>
@@ -388,26 +389,31 @@ void do_alt_swipe(int ui, int rot, const char *direction, int amount, int durati
     ev_raw(ui, EV_SYN, SYN_REPORT, 0);
 }
 
-/* ---- "ring_swipe": the ring's own gesture, replayed on the screen ----
-   Recorded from a JX-11 (itself a tiny touchscreen that always sends the same
-   pattern): ~20% of the way in small steps every ~10 ms, then one big jump right
-   before lifting, ~50 ms in total. The jump is what makes Android fling.
-   Here the shape is kept, but the length is the multiplier x 1/24 of the screen
-   and the timing is stretched by the speed setting (ms / 50; 50 = ring speed),
-   so the fling stays controllable. Direction as with the bare ring: the finger
-   on screen moves the way it moved on the ring. */
-static const struct { int permille, t; } RING_PATH[] = {   /* t in 1/50 of duration */
-    { 0, 0 }, { 35, 2 }, { 70, 9 }, { 105, 18 }, { 140, 28 }, { 210, 38 }, { 1000, 46 },
-};
-#define RING_LIFT_T 53
+/* ---- "ring_swipe": a quick flick like the ring's own gesture ----
+   The JX-11 (itself a tiny touchscreen) sends a short accelerating flick: slow
+   at first, fast at the end, ~50 ms. Replaying its exact pattern (creep, then
+   one big jump) was erratic once scaled down: Android's fling-velocity fit
+   swings wildly on a single jump. So this keeps the idea, an accelerating flick,
+   as a smooth curve (distance ~ t^2) sampled every 8 ms, lifted right after
+   the last sample. Measured: same result every time, and more distance or a
+   lower speed value always means a longer fling.
+   Length: multiplier x 1/24 of the long screen side. Speed setting: the flick's duration.
+   Direction as with the bare ring: the finger on screen moves the way it
+   moved on the ring. */
+static long now_us(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000000L + ts.tv_nsec / 1000;
+}
 
 void do_ring_swipe(int ui, int rot, const char *direction, int amount, int duration_ms) {
     if (!direction || ui < 0) return;
     int w = SCREEN_W, h = SCREEN_H;
     if (rot & 1) { int t = w; w = h; h = t; }
 
+    /* length from the long screen side in both orientations, so the flick
+       (and its fling) is the same in landscape as in portrait */
     int cx = w / 2, cy = h / 2;
-    int delta = (amount * h) / 24, deltax = (amount * w) / 24;
+    int delta = (amount * (SCREEN_W > SCREEN_H ? SCREEN_W : SCREEN_H)) / 24, deltax = delta;
     int x0 = cx, y0 = cy, x1 = cx, y1 = cy;
     if (!strcmp(direction, "up"))         { y0 = cy - delta / 2; y1 = cy + delta / 2; }
     else if (!strcmp(direction, "down"))  { y0 = cy + delta / 2; y1 = cy - delta / 2; }
@@ -416,16 +422,19 @@ void do_ring_swipe(int ui, int rot, const char *direction, int amount, int durat
     x0 = CLAMP(x0, w - 1); x1 = CLAMP(x1, w - 1);
     y0 = CLAMP(y0, h - 1); y1 = CLAMP(y1, h - 1);
 
-    if (duration_ms < 10) duration_ms = 10;
+    if (duration_ms < 16) duration_ms = 16;
+    int n = duration_ms / 8 + 1;                 /* one sample per 8 ms */
     static int tid = 0; tid = (tid + 1) & 0xffff;
-    int n = sizeof(RING_PATH) / sizeof(RING_PATH[0]), t_us = 0;
+    long t0 = now_us();
 
     for (int i = 0; i < n; i++) {
-        int at = RING_PATH[i].t * duration_ms * 20;          /* t/50 * ms * 1000 */
-        if (at > t_us) { usleep(at - t_us); t_us = at; }
-        int f = RING_PATH[i].permille, rx, ry;
-        display_to_raw(rot, x0 + (x1 - x0) * f / 1000, y0 + (y1 - y0) * f / 1000, &rx, &ry);
-        static int last_rx = -1, last_ry = -1;            /* see do_alt_swipe */
+        long at = t0 + (long)i * duration_ms * 1000 / (n - 1);
+        long wait = at - now_us();
+        if (wait > 0) usleep(wait);              /* fixed schedule: no drift */
+        long f = (long)i * i * 1000 / ((long)(n - 1) * (n - 1));   /* permille, t^2 */
+        int rx, ry;
+        display_to_raw(rot, x0 + (int)((x1 - x0) * f / 1000), y0 + (int)((y1 - y0) * f / 1000), &rx, &ry);
+        static int last_rx = -1, last_ry = -1;   /* see do_alt_swipe */
         if (rx == last_rx) rx += rx < SCREEN_W - 1 ? 1 : -1;
         if (ry == last_ry) ry += ry < SCREEN_H - 1 ? 1 : -1;
         last_rx = rx; last_ry = ry;
@@ -443,7 +452,7 @@ void do_ring_swipe(int ui, int rot, const char *direction, int amount, int durat
         }
         ev_raw(ui, EV_SYN, SYN_REPORT, 0);
     }
-    usleep(RING_LIFT_T * duration_ms * 20 - t_us);
+    usleep(2000);                                /* lift right away: a pause reads as "stopped" */
     ev_raw(ui, EV_ABS, ABS_MT_TRACKING_ID, -1);
     ev_raw(ui, EV_KEY, BTN_TOUCH, 0);
     ev_raw(ui, EV_KEY, BTN_TOOL_FINGER, 0);
