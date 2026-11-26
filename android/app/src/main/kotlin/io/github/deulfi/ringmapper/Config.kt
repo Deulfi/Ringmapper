@@ -12,6 +12,7 @@ object Config {
         "scroll_down" to "Scroll down",
         "swipe" to "Touch swipe",
         "alt_swipe" to "Alt swipe",
+        "ring_swipe" to "Ring swipe",
         "dpad_up" to "D-pad up",
         "dpad_down" to "D-pad down",
         "dpad_left" to "D-pad left",

@@ -256,7 +256,8 @@ void do_touch_swipe(const char *direction, int amount, int duration_ms) {
 
 int needs_touch(config_t *cfg) {
     const char *vals[4] = {cfg->up, cfg->down, cfg->left, cfg->right};
-    for (int i = 0; i < 4; i++) if (!strcmp(vals[i], "alt_swipe")) return 1;
+    for (int i = 0; i < 4; i++)
+        if (!strcmp(vals[i], "alt_swipe") || !strcmp(vals[i], "ring_swipe")) return 1;
     return 0;
 }
 
@@ -381,6 +382,68 @@ void do_alt_swipe(int ui, int rot, const char *direction, int amount, int durati
         ev_raw(ui, EV_SYN, SYN_REPORT, 0);
         if (i < steps) usleep(duration_ms * 1000 / steps);
     }
+    ev_raw(ui, EV_ABS, ABS_MT_TRACKING_ID, -1);
+    ev_raw(ui, EV_KEY, BTN_TOUCH, 0);
+    ev_raw(ui, EV_KEY, BTN_TOOL_FINGER, 0);
+    ev_raw(ui, EV_SYN, SYN_REPORT, 0);
+}
+
+/* ---- "ring_swipe": the ring's own gesture, replayed on the screen ----
+   Recorded from a JX-11 (itself a tiny touchscreen that always sends the same
+   pattern): ~20% of the way in small steps every ~10 ms, then one big jump right
+   before lifting, ~50 ms in total. The jump is what makes Android fling.
+   Here the shape is kept, but the length is the multiplier x 1/24 of the screen
+   and the timing is stretched by the speed setting (ms / 50; 50 = ring speed),
+   so the fling stays controllable. Direction as with the bare ring: the finger
+   on screen moves the way it moved on the ring. */
+static const struct { int permille, t; } RING_PATH[] = {   /* t in 1/50 of duration */
+    { 0, 0 }, { 35, 2 }, { 70, 9 }, { 105, 18 }, { 140, 28 }, { 210, 38 }, { 1000, 46 },
+};
+#define RING_LIFT_T 53
+
+void do_ring_swipe(int ui, int rot, const char *direction, int amount, int duration_ms) {
+    if (!direction || ui < 0) return;
+    int w = SCREEN_W, h = SCREEN_H;
+    if (rot & 1) { int t = w; w = h; h = t; }
+
+    int cx = w / 2, cy = h / 2;
+    int delta = (amount * h) / 24, deltax = (amount * w) / 24;
+    int x0 = cx, y0 = cy, x1 = cx, y1 = cy;
+    if (!strcmp(direction, "up"))         { y0 = cy - delta / 2; y1 = cy + delta / 2; }
+    else if (!strcmp(direction, "down"))  { y0 = cy + delta / 2; y1 = cy - delta / 2; }
+    else if (!strcmp(direction, "left"))  { x0 = cx - deltax / 2; x1 = cx + deltax / 2; }
+    else if (!strcmp(direction, "right")) { x0 = cx + deltax / 2; x1 = cx - deltax / 2; }
+    x0 = CLAMP(x0, w - 1); x1 = CLAMP(x1, w - 1);
+    y0 = CLAMP(y0, h - 1); y1 = CLAMP(y1, h - 1);
+
+    if (duration_ms < 10) duration_ms = 10;
+    static int tid = 0; tid = (tid + 1) & 0xffff;
+    int n = sizeof(RING_PATH) / sizeof(RING_PATH[0]), t_us = 0;
+
+    for (int i = 0; i < n; i++) {
+        int at = RING_PATH[i].t * duration_ms * 20;          /* t/50 * ms * 1000 */
+        if (at > t_us) { usleep(at - t_us); t_us = at; }
+        int f = RING_PATH[i].permille, rx, ry;
+        display_to_raw(rot, x0 + (x1 - x0) * f / 1000, y0 + (y1 - y0) * f / 1000, &rx, &ry);
+        static int last_rx = -1, last_ry = -1;            /* see do_alt_swipe */
+        if (rx == last_rx) rx += rx < SCREEN_W - 1 ? 1 : -1;
+        if (ry == last_ry) ry += ry < SCREEN_H - 1 ? 1 : -1;
+        last_rx = rx; last_ry = ry;
+        if (i == 0) {
+            ev_raw(ui, EV_ABS, ABS_MT_SLOT, 0);
+            ev_raw(ui, EV_ABS, ABS_MT_TRACKING_ID, tid);
+        }
+        ev_raw(ui, EV_ABS, ABS_MT_POSITION_X, rx);
+        ev_raw(ui, EV_ABS, ABS_MT_POSITION_Y, ry);
+        ev_raw(ui, EV_ABS, ABS_X, rx);
+        ev_raw(ui, EV_ABS, ABS_Y, ry);
+        if (i == 0) {
+            ev_raw(ui, EV_KEY, BTN_TOUCH, 1);
+            ev_raw(ui, EV_KEY, BTN_TOOL_FINGER, 1);
+        }
+        ev_raw(ui, EV_SYN, SYN_REPORT, 0);
+    }
+    usleep(RING_LIFT_T * duration_ms * 20 - t_us);
     ev_raw(ui, EV_ABS, ABS_MT_TRACKING_ID, -1);
     ev_raw(ui, EV_KEY, BTN_TOUCH, 0);
     ev_raw(ui, EV_KEY, BTN_TOOL_FINGER, 0);
@@ -590,6 +653,10 @@ int main(int argc, char **argv) {
                         int rot = rotation_read();
                         if (rot != last_rot) { fprintf(stderr, "ring_mapper: alt swipe, rotation %d\n", rot * 90); last_rot = rot; }
                         do_alt_swipe(ui_touch, rot, direction, mult, cfg.swipe_duration_ms);
+                    } else if (!strcmp(action, "ring_swipe")) {
+                        int rot = rotation_read();
+                        if (rot != last_rot) { fprintf(stderr, "ring_mapper: ring swipe, rotation %d\n", rot * 90); last_rot = rot; }
+                        do_ring_swipe(ui_touch, rot, direction, mult, cfg.swipe_duration_ms);
                     } else {
                         for (int i = 0; i < mult; i++) do_action(ui_wheel, ui_keys, action);
                     }
