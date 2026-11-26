@@ -225,15 +225,22 @@ void do_action(int ui_wheel, int ui_keys, const char *action) {
     }
 }
 
-void do_touch_swipe(const char *direction, int amount, int duration_ms) {
+/* "alt_swipe": the swipe through Android's `input touchscreen swipe` command.
+   Slow and heavy (it starts a Java VM per swipe, ~0.9 s on an older phone), but
+   uses no virtual device: the fallback if the virtual touchscreen misbehaves. */
+#define LANDSCAPE_BOOST(d, land) ((land) ? (d) * 5 / 4 : (d))   /* 25% more in landscape */
+
+void do_input_swipe(const char *direction, int amount, int duration_ms) {
     if (!direction) return;
     int w = SCREEN_W, h = SCREEN_H;
-    if (is_landscape()) { int t = w; w = h; h = t; }
+    int land = is_landscape();
+    if (land) { int t = w; w = h; h = t; }
 
     int cx = w / 2, cy = h / 2;
-    /* swipe length as a % of the relevant dimension, so it scales with orientation */
-    int delta = (amount * h) / 12; /* ~8% of screen height per multiplier unit, vertical */
-    int deltax = (amount * w) / 12;
+    /* swipe length as a % of the relevant dimension (~8% per multiplier unit),
+       plus 25% in landscape, where it otherwise felt too short next to portrait */
+    int delta = LANDSCAPE_BOOST((amount * h) / 12, land);
+    int deltax = LANDSCAPE_BOOST((amount * w) / 12, land);
     int x0 = cx, y0 = cy, x1 = cx, y1 = cy;
 
     if (!strcmp(direction, "up"))         { y0 = cy + delta / 2; y1 = cy - delta / 2; }
@@ -251,14 +258,13 @@ void do_touch_swipe(const char *direction, int amount, int duration_ms) {
     system(cmd);
 }
 
-/* ---- "alt_swipe": native touch swipe through a virtual touchscreen ----
-   Same gesture as "swipe", but injected by our own uinput touchscreen instead of
-   `input touchscreen swipe` (which starts a Java VM each time, slow on old phones). */
+/* ---- virtual touchscreen ("swipe" and "ring_swipe") ----
+   Swipes injected by our own uinput touchscreen: no process start per swipe. */
 
 int needs_touch(config_t *cfg) {
     const char *vals[4] = {cfg->up, cfg->down, cfg->left, cfg->right};
     for (int i = 0; i < 4; i++)
-        if (!strcmp(vals[i], "alt_swipe") || !strcmp(vals[i], "ring_swipe")) return 1;
+        if (!strcmp(vals[i], "swipe") || !strcmp(vals[i], "ring_swipe")) return 1;
     return 0;
 }
 
@@ -269,7 +275,7 @@ int needs_touch(config_t *cfg) {
    across gestures), and Android then reads the missing axis as 0, the screen
    edge (a touch starting at x=0 is a back gesture with gesture navigation). So
    never repeat the last value sent: shift it by 1 px instead. One state per
-   device, shared by every gesture that uses it (alt and ring swipe), reset
+   device, shared by every gesture that uses it (touch and ring swipe), reset
    when the device is created. */
 static int g_touch_last_x = -1, g_touch_last_y = -1;
 
@@ -352,14 +358,17 @@ static void ev_raw(int ui, int type, int code, int value) {
     write(ui, &ev, sizeof(ev));
 }
 
-void do_alt_swipe(int ui, int rot, const char *direction, int amount, int duration_ms) {
+/* "swipe" (Touch swipe): a straight swipe at constant speed, same geometry as
+   do_input_swipe, injected through the virtual touchscreen. */
+void do_uinput_swipe(int ui, int rot, const char *direction, int amount, int duration_ms) {
     if (!direction || ui < 0) return;
     int w = SCREEN_W, h = SCREEN_H;
     if (rot & 1) { int t = w; w = h; h = t; }
 
-    /* same geometry as do_touch_swipe */
+    /* same geometry as do_input_swipe */
     int cx = w / 2, cy = h / 2;
-    int delta = (amount * h) / 12, deltax = (amount * w) / 12;
+    int delta = LANDSCAPE_BOOST((amount * h) / 12, rot & 1);
+    int deltax = LANDSCAPE_BOOST((amount * w) / 12, rot & 1);
     int x0 = cx, y0 = cy, x1 = cx, y1 = cy;
     if (!strcmp(direction, "up"))         { y0 = cy + delta / 2; y1 = cy - delta / 2; }
     else if (!strcmp(direction, "down"))  { y0 = cy - delta / 2; y1 = cy + delta / 2; }
@@ -676,12 +685,12 @@ int main(int argc, char **argv) {
                     else        { action = cfg.right; mult = cfg.right_mult; direction = "right"; }
                 }
                 if (action) {
-                    if (!strcmp(action, "swipe")) {
-                        do_touch_swipe(direction, mult, cfg.swipe_duration_ms);
-                    } else if (!strcmp(action, "alt_swipe")) {
+                    if (!strcmp(action, "alt_swipe")) {
+                        do_input_swipe(direction, mult, cfg.swipe_duration_ms);
+                    } else if (!strcmp(action, "swipe")) {
                         int rot = rotation_read();
-                        if (rot != last_rot) { fprintf(stderr, "ring_mapper: alt swipe, rotation %d\n", rot * 90); last_rot = rot; }
-                        do_alt_swipe(ui_touch, rot, direction, mult, cfg.swipe_duration_ms);
+                        if (rot != last_rot) { fprintf(stderr, "ring_mapper: touch swipe, rotation %d\n", rot * 90); last_rot = rot; }
+                        do_uinput_swipe(ui_touch, rot, direction, mult, cfg.swipe_duration_ms);
                     } else if (!strcmp(action, "ring_swipe")) {
                         int rot = rotation_read();
                         if (rot != last_rot) { fprintf(stderr, "ring_mapper: ring swipe, rotation %d\n", rot * 90); last_rot = rot; }
@@ -690,7 +699,7 @@ int main(int argc, char **argv) {
                         for (int i = 0; i < mult; i++) do_action(ui_wheel, ui_keys, action);
                     }
                 }
-                rotation_drop();                 /* no-op if alt_swipe already read it */
+                rotation_drop();                 /* no-op if a swipe already read it */
                 start_x = last_x = start_y = last_y = -1;
             }
         }
