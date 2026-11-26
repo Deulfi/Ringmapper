@@ -506,14 +506,24 @@ static int take_instance_lock(void) {
 }
 
 /* Block (0% CPU) until something changes in /dev/input, or a signal arrives. */
-static void wait_for_input_change(void) {
+/* Then, if the ring is what appeared, return as soon as it can be opened.
+   Android opens a new input device right away too, and every ring touch
+   before our grab reaches it at x=0 (the ring sends no X): the screen edge, a
+   back gesture with gesture navigation. A fixed 300 ms wait here let the first
+   swipe after the ring woke up leak through (measured). As shell the node may
+   still be root-only until ueventd fixes owner and SELinux label, so poll. */
+static void wait_for_input_change(const char *name) {
     int in = inotify_init1(IN_CLOEXEC);
     if (in < 0) { sleep(5); return; }
     if (inotify_add_watch(in, "/dev/input", IN_CREATE | IN_ATTRIB) < 0) { close(in); sleep(5); return; }
-    char buf[512];
-    read(in, buf, sizeof(buf));                  /* returns on event or EINTR */
+    char buf[512], path[64];
+    if (find_device(name, path, sizeof(path)) < 0)   /* appeared before the watch? */
+        read(in, buf, sizeof(buf));              /* returns on event or EINTR */
     close(in);
-    usleep(300000);                              /* let ueventd set owner + SELinux label */
+    for (int i = 0; i < 200 && !g_quit && !g_reload; i++) {   /* up to 1 s */
+        if (find_device(name, path, sizeof(path)) == 0) return;
+        usleep(5000);
+    }
 }
 
 static void list_devices(void) {
@@ -624,7 +634,7 @@ int main(int argc, char **argv) {
         char dev_path[64];
         if (find_device(cfg.name, dev_path, sizeof(dev_path)) < 0) {
             if (!waiting_logged) { fprintf(stderr, "ring_mapper: waiting for \"%s\"\n", cfg.name); waiting_logged = 1; }
-            wait_for_input_change();
+            wait_for_input_change(cfg.name);
             continue;
         }
         waiting_logged = 0;
@@ -632,7 +642,7 @@ int main(int argc, char **argv) {
         int fd = open(dev_path, O_RDONLY | O_CLOEXEC);
         if (fd < 0) {
             fprintf(stderr, "ring_mapper: cannot open %s: %s\n", dev_path, strerror(errno));
-            wait_for_input_change();
+            wait_for_input_change(cfg.name);
             continue;
         }
         if (ioctl(fd, EVIOCGRAB, 1) < 0)
