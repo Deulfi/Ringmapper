@@ -265,6 +265,20 @@ int needs_touch(config_t *cfg) {
 /* Legacy uinput_user_dev setup (works on old kernels too). The axes cover the
    panel in its natural orientation, like a real built-in touchscreen; Android
    rotates the coordinates itself, so we feed it natural-orientation values. */
+/* The kernel drops an ABS value equal to the previous one on that device (also
+   across gestures), and Android then reads the missing axis as 0, the screen
+   edge (a touch starting at x=0 is a back gesture with gesture navigation). So
+   never repeat the last value sent: shift it by 1 px instead. One state per
+   device, shared by every gesture that uses it (alt and ring swipe), reset
+   when the device is created. */
+static int g_touch_last_x = -1, g_touch_last_y = -1;
+
+static void touch_no_repeat(int *rx, int *ry) {
+    if (*rx == g_touch_last_x) *rx += *rx < SCREEN_W - 1 ? 1 : -1;
+    if (*ry == g_touch_last_y) *ry += *ry < SCREEN_H - 1 ? 1 : -1;
+    g_touch_last_x = *rx; g_touch_last_y = *ry;
+}
+
 int setup_uinput_touch(void) {
     int ui = open("/dev/uinput", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
     if (ui < 0) return -1;
@@ -288,6 +302,7 @@ int setup_uinput_touch(void) {
     ud.absmax[ABS_MT_SLOT] = 0;
     ud.absmax[ABS_MT_TRACKING_ID] = 65535;
     if (write(ui, &ud, sizeof(ud)) != (ssize_t)sizeof(ud) || ioctl(ui, UI_DEV_CREATE) < 0) { close(ui); return -1; }
+    g_touch_last_x = g_touch_last_y = 0;         /* a new device starts at 0 */
     usleep(300000);                              /* let Android register the device */
     return ui;
 }
@@ -361,13 +376,7 @@ void do_alt_swipe(int ui, int rot, const char *direction, int amount, int durati
     for (int i = 0; i <= steps; i++) {
         int rx, ry;
         display_to_raw(rot, x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps, &rx, &ry);
-        /* The kernel drops an ABS value equal to the previous one (also across
-           gestures), and Android then reads the missing axis as 0, i.e. the screen
-           edge. So never repeat the last value: shift it by 1 px instead. */
-        static int last_rx = -1, last_ry = -1;
-        if (rx == last_rx) rx += rx < SCREEN_W - 1 ? 1 : -1;
-        if (ry == last_ry) ry += ry < SCREEN_H - 1 ? 1 : -1;
-        last_rx = rx; last_ry = ry;
+        touch_no_repeat(&rx, &ry);
         if (i == 0) {
             ev_raw(ui, EV_ABS, ABS_MT_SLOT, 0);
             ev_raw(ui, EV_ABS, ABS_MT_TRACKING_ID, tid);
@@ -438,10 +447,7 @@ void do_ring_swipe(int ui, int rot, const char *direction, int amount, int durat
         long f = (long)i * i * 1000 / ((long)(n - 1) * (n - 1));   /* permille, t^2 */
         int rx, ry;
         display_to_raw(rot, x0 + (int)((x1 - x0) * f / 1000), y0 + (int)((y1 - y0) * f / 1000), &rx, &ry);
-        static int last_rx = -1, last_ry = -1;   /* see do_alt_swipe */
-        if (rx == last_rx) rx += rx < SCREEN_W - 1 ? 1 : -1;
-        if (ry == last_ry) ry += ry < SCREEN_H - 1 ? 1 : -1;
-        last_rx = rx; last_ry = ry;
+        touch_no_repeat(&rx, &ry);
         if (i == 0) {
             ev_raw(ui, EV_ABS, ABS_MT_SLOT, 0);
             ev_raw(ui, EV_ABS, ABS_MT_TRACKING_ID, tid);
