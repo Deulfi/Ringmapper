@@ -406,7 +406,7 @@ void do_alt_swipe(int ui, int rot, const char *direction, int amount, int durati
    as a smooth curve (distance ~ t^2) sampled every 8 ms, lifted right after
    the last sample. Measured: same result every time, and more distance or a
    lower speed value always means a longer fling.
-   Length: multiplier x 1/24 of the long screen side (75% of that in landscape).
+   Length: multiplier x 1/24 of the long screen side (half of that in landscape).
    Speed setting: the flick's duration.
    Direction as with the bare ring: the finger on screen moves the way it
    moved on the ring. */
@@ -421,11 +421,11 @@ void do_ring_swipe(int ui, int rot, const char *direction, int amount, int durat
     if (rot & 1) { int t = w; w = h; h = t; }
 
     /* Length from the long screen side, so it doesn't depend on orientation,
-       then 75% in landscape: the visible page is much shorter there, so the
-       same scroll would feel too far. One setting then suits both. */
+       then half of that in landscape: the visible page is much shorter there,
+       so the same scroll would feel too far. One setting then suits both. */
     int cx = w / 2, cy = h / 2;
     int delta = (amount * (SCREEN_W > SCREEN_H ? SCREEN_W : SCREEN_H)) / 24;
-    if (rot & 1) delta = delta * 3 / 4;
+    if (rot & 1) delta = delta / 2;
     int deltax = delta;
     int x0 = cx, y0 = cy, x1 = cx, y1 = cy;
     if (!strcmp(direction, "up"))         { y0 = cy - delta / 2; y1 = cy + delta / 2; }
