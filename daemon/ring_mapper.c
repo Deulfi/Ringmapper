@@ -199,9 +199,16 @@ static void send_android_keycode(int keycode) {
     system(cmd);
 }
 
+static void push_cursor_right(int ui, int steps);
+
 void do_action(int ui_wheel, int ui_keys, const char *action) {
-    if (!strcmp(action, "scroll_up"))   { if (ui_wheel >= 0) emit(ui_wheel, EV_REL, REL_WHEEL, 1);  return; }
-    if (!strcmp(action, "scroll_down")) { if (ui_wheel >= 0) emit(ui_wheel, EV_REL, REL_WHEEL, -1); return; }
+    int wheel = !strcmp(action, "scroll_up") ? 1 : !strcmp(action, "scroll_down") ? -1 : 0;
+    if (wheel) {
+        if (ui_wheel < 0) return;
+        push_cursor_right(ui_wheel, 6);          /* keep it parked, e.g. after a rotation */
+        emit(ui_wheel, EV_REL, REL_WHEEL, wheel);
+        return;
+    }
 
     /* custom keycode: "key:<android keycode>", e.g. key:93 */
     if (!strncmp(action, "key:", 4)) {
@@ -243,12 +250,157 @@ void do_touch_swipe(const char *direction, int amount, int duration_ms) {
     system(cmd);
 }
 
-/* move the (unavoidable) pointer to the bottom-left corner;
-   the short wait lets Android register the new uinput device first */
+/* ---- "alt_swipe": native touch swipe through a virtual touchscreen ----
+   Same gesture as "swipe", but injected by our own uinput touchscreen instead of
+   `input touchscreen swipe` (which starts a Java VM each time, slow on old phones). */
+
+int needs_touch(config_t *cfg) {
+    const char *vals[4] = {cfg->up, cfg->down, cfg->left, cfg->right};
+    for (int i = 0; i < 4; i++) if (!strcmp(vals[i], "alt_swipe")) return 1;
+    return 0;
+}
+
+/* Legacy uinput_user_dev setup (works on old kernels too). The axes cover the
+   panel in its natural orientation, like a real built-in touchscreen; Android
+   rotates the coordinates itself, so we feed it natural-orientation values. */
+int setup_uinput_touch(void) {
+    int ui = open("/dev/uinput", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    if (ui < 0) return -1;
+    ioctl(ui, UI_SET_EVBIT, EV_KEY);
+    ioctl(ui, UI_SET_KEYBIT, BTN_TOUCH);
+    ioctl(ui, UI_SET_KEYBIT, BTN_TOOL_FINGER);
+    ioctl(ui, UI_SET_EVBIT, EV_ABS);
+    ioctl(ui, UI_SET_ABSBIT, ABS_X);
+    ioctl(ui, UI_SET_ABSBIT, ABS_Y);
+    ioctl(ui, UI_SET_ABSBIT, ABS_MT_SLOT);
+    ioctl(ui, UI_SET_ABSBIT, ABS_MT_TRACKING_ID);
+    ioctl(ui, UI_SET_ABSBIT, ABS_MT_POSITION_X);
+    ioctl(ui, UI_SET_ABSBIT, ABS_MT_POSITION_Y);
+    ioctl(ui, UI_SET_PROPBIT, INPUT_PROP_DIRECT); /* touchscreen, not touchpad */
+
+    struct uinput_user_dev ud; memset(&ud, 0, sizeof(ud));
+    strcpy(ud.name, "ring-touch");
+    ud.id.bustype = BUS_VIRTUAL; ud.id.vendor = 0x1234; ud.id.product = 0x567a; ud.id.version = 1;
+    ud.absmax[ABS_X] = ud.absmax[ABS_MT_POSITION_X] = SCREEN_W - 1;
+    ud.absmax[ABS_Y] = ud.absmax[ABS_MT_POSITION_Y] = SCREEN_H - 1;
+    ud.absmax[ABS_MT_SLOT] = 0;
+    ud.absmax[ABS_MT_TRACKING_ID] = 65535;
+    if (write(ui, &ud, sizeof(ud)) != (ssize_t)sizeof(ud) || ioctl(ui, UI_DEV_CREATE) < 0) { close(ui); return -1; }
+    usleep(300000);                              /* let Android register the device */
+    return ui;
+}
+
+/* Display rotation 0..3. Started with popen at finger-down so dumpsys runs while
+   the finger is still on the ring; read (and drained) at lift. */
+#define ROT_CMD "dumpsys window displays 2>/dev/null | grep -E 'mCurrentRotation=|mRotation=[0-3]'"
+static FILE *g_rot_fp = NULL;
+
+static void rotation_prefetch(void) { if (!g_rot_fp) g_rot_fp = popen(ROT_CMD, "r"); }
+
+static int rotation_read(void) {
+    FILE *fp = g_rot_fp ? g_rot_fp : popen(ROT_CMD, "r");
+    g_rot_fp = NULL;
+    if (!fp) return 0;
+    char line[160]; int rot = -1;
+    while (fgets(line, sizeof(line), fp)) {      /* read all: dumpsys never hits a closed pipe */
+        if (rot >= 0) continue;
+        char *p;
+        if ((p = strstr(line, "ROTATION_"))) {   /* Android 10+: mCurrentRotation=ROTATION_90 */
+            int deg = atoi(p + 9);
+            rot = deg == 90 ? 1 : deg == 180 ? 2 : deg == 270 ? 3 : 0;
+        } else if ((p = strstr(line, "mRotation=")) && p[10] >= '0' && p[10] <= '3') {
+            rot = p[10] - '0';                   /* older: mRotation=1 */
+        }
+    }
+    pclose(fp);
+    return rot < 0 ? 0 : rot;
+}
+
+static void rotation_drop(void) { if (g_rot_fp) rotation_read(); }
+
+/* display coords (current rotation) -> raw panel coords (natural orientation) */
+static void display_to_raw(int rot, int dx, int dy, int *rx, int *ry) {
+    int W = SCREEN_W - 1, H = SCREEN_H - 1;
+    switch (rot) {
+    case 1:  *rx = W - dy; *ry = dx;     break;
+    case 2:  *rx = W - dx; *ry = H - dy; break;
+    case 3:  *rx = dy;     *ry = H - dx; break;
+    default: *rx = dx;     *ry = dy;     break;
+    }
+}
+
+static void ev_raw(int ui, int type, int code, int value) {
+    struct input_event ev = {0};
+    ev.type = type; ev.code = code; ev.value = value;
+    write(ui, &ev, sizeof(ev));
+}
+
+void do_alt_swipe(int ui, int rot, const char *direction, int amount, int duration_ms) {
+    if (!direction || ui < 0) return;
+    int w = SCREEN_W, h = SCREEN_H;
+    if (rot & 1) { int t = w; w = h; h = t; }
+
+    /* same geometry as do_touch_swipe */
+    int cx = w / 2, cy = h / 2;
+    int delta = (amount * h) / 12, deltax = (amount * w) / 12;
+    int x0 = cx, y0 = cy, x1 = cx, y1 = cy;
+    if (!strcmp(direction, "up"))         { y0 = cy + delta / 2; y1 = cy - delta / 2; }
+    else if (!strcmp(direction, "down"))  { y0 = cy - delta / 2; y1 = cy + delta / 2; }
+    else if (!strcmp(direction, "left"))  { x0 = cx + deltax / 2; x1 = cx - deltax / 2; }
+    else if (!strcmp(direction, "right")) { x0 = cx - deltax / 2; x1 = cx + deltax / 2; }
+    #define CLAMP(v, hi) ((v) < 0 ? 0 : (v) > (hi) ? (hi) : (v))
+    x0 = CLAMP(x0, w - 1); x1 = CLAMP(x1, w - 1);
+    y0 = CLAMP(y0, h - 1); y1 = CLAMP(y1, h - 1);
+
+    if (duration_ms < 10) duration_ms = 10;
+    int steps = duration_ms / 8; if (steps < 2) steps = 2;
+    static int tid = 0; tid = (tid + 1) & 0xffff;
+
+    for (int i = 0; i <= steps; i++) {
+        int rx, ry;
+        display_to_raw(rot, x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps, &rx, &ry);
+        /* The kernel drops an ABS value equal to the previous one (also across
+           gestures), and Android then reads the missing axis as 0, i.e. the screen
+           edge. So never repeat the last value: shift it by 1 px instead. */
+        static int last_rx = -1, last_ry = -1;
+        if (rx == last_rx) rx += rx < SCREEN_W - 1 ? 1 : -1;
+        if (ry == last_ry) ry += ry < SCREEN_H - 1 ? 1 : -1;
+        last_rx = rx; last_ry = ry;
+        if (i == 0) {
+            ev_raw(ui, EV_ABS, ABS_MT_SLOT, 0);
+            ev_raw(ui, EV_ABS, ABS_MT_TRACKING_ID, tid);
+        }
+        ev_raw(ui, EV_ABS, ABS_MT_POSITION_X, rx);
+        ev_raw(ui, EV_ABS, ABS_MT_POSITION_Y, ry);
+        ev_raw(ui, EV_ABS, ABS_X, rx);
+        ev_raw(ui, EV_ABS, ABS_Y, ry);
+        if (i == 0) {
+            ev_raw(ui, EV_KEY, BTN_TOUCH, 1);
+            ev_raw(ui, EV_KEY, BTN_TOOL_FINGER, 1);
+        }
+        ev_raw(ui, EV_SYN, SYN_REPORT, 0);
+        if (i < steps) usleep(duration_ms * 1000 / steps);
+    }
+    ev_raw(ui, EV_ABS, ABS_MT_TRACKING_ID, -1);
+    ev_raw(ui, EV_KEY, BTN_TOUCH, 0);
+    ev_raw(ui, EV_KEY, BTN_TOOL_FINGER, 0);
+    ev_raw(ui, EV_SYN, SYN_REPORT, 0);
+}
+
+/* Push the (unavoidable) pointer against the right screen edge.
+   The arrow is drawn right of its hotspot, so at the right edge it is almost
+   entirely off screen, while the hotspot stays over the app (the bottom edge
+   would put it over the nav bar and scrolling would stop working).
+   Android scales mouse deltas by the pointer speed setting (down to ~1/8 on
+   older versions), so push far in several steps; it clamps at the edge. */
+static void push_cursor_right(int ui, int steps) {
+    for (int i = 0; i < steps; i++) emit(ui, EV_REL, REL_X, 500);
+}
+
+/* the short wait lets Android register the new uinput device first */
 void park_cursor(int ui) {
     usleep(300000);
-    emit(ui, EV_REL, REL_X, -999);
-    emit(ui, EV_REL, REL_Y, 99);
+    push_cursor_right(ui, 40);
 }
 
 static void destroy_uinput(int *ui) {
@@ -357,7 +509,7 @@ int main(int argc, char **argv) {
     detect_screen_size();
     fprintf(stderr, "ring_mapper: started (pid %d, uid %d, config %s)\n", getpid(), getuid(), config_path);
 
-    int ui_wheel = -1, ui_keys = -1;
+    int ui_wheel = -1, ui_keys = -1, ui_touch = -1, last_rot = -1;
     int need_setup = 1, waiting_logged = 0;
 
     while (!g_quit) {
@@ -367,6 +519,7 @@ int main(int argc, char **argv) {
             else fprintf(stderr, "ring_mapper: config reloaded\n");
             destroy_uinput(&ui_wheel);
             destroy_uinput(&ui_keys);
+            destroy_uinput(&ui_touch);
             need_setup = 1;
         }
         if (need_setup) {
@@ -378,6 +531,10 @@ int main(int argc, char **argv) {
             if (needs_keys(&cfg)) {
                 ui_keys = setup_uinput_keys();
                 if (ui_keys < 0) fprintf(stderr, "ring_mapper: cannot create key device: %s\n", strerror(errno));
+            }
+            if (needs_touch(&cfg)) {
+                ui_touch = setup_uinput_touch();
+                if (ui_touch < 0) fprintf(stderr, "ring_mapper: cannot create touch device: %s\n", strerror(errno));
             }
             need_setup = 0;
         }
@@ -408,6 +565,8 @@ int main(int argc, char **argv) {
                 if (n < 0 && errno == EINTR && !g_quit && !g_reload) continue;
                 break;                           /* ENODEV = ring gone, or reload/quit */
             }
+            if (ui_touch >= 0 && (ev.type == EV_ABS || (ev.type == EV_KEY && ev.code == BTN_TOUCH && ev.value)))
+                rotation_prefetch();             /* finger down: look up rotation meanwhile */
             if (ev.type == EV_ABS && (ev.code == ABS_X || ev.code == ABS_MT_POSITION_X)) {
                 last_x = ev.value; if (start_x < 0) start_x = last_x;
             } else if (ev.type == EV_ABS && (ev.code == ABS_Y || ev.code == ABS_MT_POSITION_Y)) {
@@ -427,13 +586,19 @@ int main(int argc, char **argv) {
                 if (action) {
                     if (!strcmp(action, "swipe")) {
                         do_touch_swipe(direction, mult, cfg.swipe_duration_ms);
+                    } else if (!strcmp(action, "alt_swipe")) {
+                        int rot = rotation_read();
+                        if (rot != last_rot) { fprintf(stderr, "ring_mapper: alt swipe, rotation %d\n", rot * 90); last_rot = rot; }
+                        do_alt_swipe(ui_touch, rot, direction, mult, cfg.swipe_duration_ms);
                     } else {
                         for (int i = 0; i < mult; i++) do_action(ui_wheel, ui_keys, action);
                     }
                 }
+                rotation_drop();                 /* no-op if alt_swipe already read it */
                 start_x = last_x = start_y = last_y = -1;
             }
         }
+        rotation_drop();
         ioctl(fd, EVIOCGRAB, 0);
         close(fd);
         if (!g_quit && !g_reload) fprintf(stderr, "ring_mapper: disconnected, waiting\n");
@@ -441,6 +606,7 @@ int main(int argc, char **argv) {
 
     destroy_uinput(&ui_wheel);
     destroy_uinput(&ui_keys);
+    destroy_uinput(&ui_touch);
     close(lock);
     fprintf(stderr, "ring_mapper: stopped\n");
     return 0;
