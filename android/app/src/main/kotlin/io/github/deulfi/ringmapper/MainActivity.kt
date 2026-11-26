@@ -32,6 +32,7 @@ class MainActivity : Activity() {
     private lateinit var modeSpinner: Spinner
     private lateinit var swipeEdit: EditText
     private lateinit var autostartBox: CheckBox
+    private lateinit var profileSpinner: Spinner
     private val actionSpinners = mutableMapOf<String, Spinner>()
     private val keyEdits = mutableMapOf<String, EditText>()
     private val multEdits = mutableMapOf<String, EditText>()
@@ -87,6 +88,15 @@ class MainActivity : Activity() {
         col.addView(modeSpinner)
         col.addView(Button(this).apply { text = "Grant Shizuku permission"; setOnClickListener { requestShizuku() } })
 
+        col.addView(label("Profile"))
+        profileSpinner = Spinner(this)
+        col.addView(profileSpinner)
+        val profRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        for ((t, f) in listOf<Pair<String, () -> Unit>>("Load" to ::loadProfile, "Save…" to ::saveProfile, "Delete" to ::deleteProfile))
+            profRow.addView(Button(this).apply { text = t; setOnClickListener { f() } }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        col.addView(profRow)
+        refreshProfiles()
+
         col.addView(label("Ring device name"))
         val nameRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         nameEdit = EditText(this).apply { isSingleLine = true }
@@ -108,11 +118,11 @@ class MainActivity : Activity() {
             val mult = numberEdit(true).apply { hint = "Multiplier" }
             actionSpinners[d] = sp; keyEdits[d] = key; multEdits[d] = mult
             col.addView(sp); col.addView(key)
-            col.addView(TextView(this).apply { text = "Multiplier (repeats; swipe distance for Touch swipe)" })
+            col.addView(TextView(this).apply { text = "Multiplier (repeats; distance for the swipes, negative = reverse)" })
             col.addView(mult)
         }
 
-        col.addView(label("Touch swipe speed (ms): lower = faster fling"))
+        col.addView(label("Swipe speed (ms): lower = faster fling"))
         swipeEdit = numberEdit(false)
         col.addView(swipeEdit)
 
@@ -175,6 +185,66 @@ class MainActivity : Activity() {
         ed.putBoolean("autostart", autostartBox.isChecked)
         ed.apply()
         loadPrefs()   // show clamped values
+    }
+
+    // ---------- profiles (the form's mapping, saved under a name) ----------
+
+    private fun formValues(): Map<String, String> = buildMap {
+        put("name", nameEdit.text.toString().trim())
+        for (d in Config.DIRS) {
+            put(d, Config.ACTIONS[actionSpinners[d]!!.selectedItemPosition].first)
+            put("${d}_key", keyEdits[d]!!.text.toString().trim())
+            put("${d}_mult", multEdits[d]!!.text.toString().trim())
+        }
+        put("swipe_duration_ms", swipeEdit.text.toString().trim())
+    }
+
+    private fun refreshProfiles(select: String? = null) {
+        val names = Config.profileNames(this)
+        profileSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item,
+            names.ifEmpty { listOf("(no saved profiles)") })
+        if (select != null) profileSpinner.setSelection(names.indexOf(select).coerceAtLeast(0))
+    }
+
+    private fun selectedProfile(): String? =
+        Config.profileNames(this).getOrNull(profileSpinner.selectedItemPosition)
+
+    private fun saveProfile() {
+        val input = EditText(this).apply { isSingleLine = true; setText(selectedProfile() ?: "") }
+        AlertDialog.Builder(this)
+            .setTitle("Save profile as")
+            .setView(input)
+            .setPositiveButton("Save") { _, _ ->
+                val n = input.text.toString().trim()
+                if (n.isEmpty()) return@setPositiveButton
+                Config.saveProfile(this, n, formValues())
+                refreshProfiles(n)
+                setStatus("Saved profile \"$n\". Apply & start uses whatever the form shows.")
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun loadProfile() {
+        val n = selectedProfile() ?: return setStatus("No saved profile to load.")
+        val v = Config.loadProfile(this, n)
+        v["name"]?.takeIf { it.isNotEmpty() }?.let { nameEdit.setText(it) }
+        for (d in Config.DIRS) {
+            v[d]?.let { a -> actionSpinners[d]!!.setSelection(Config.ACTIONS.indexOfFirst { it.first == a }.coerceAtLeast(0)) }
+            v["${d}_key"]?.let { keyEdits[d]!!.setText(it) }
+            v["${d}_mult"]?.let { multEdits[d]!!.setText(it) }
+        }
+        v["swipe_duration_ms"]?.let { swipeEdit.setText(it) }
+        setStatus("Loaded profile \"$n\". Tap Apply & start to use it.")
+    }
+
+    private fun deleteProfile() {
+        val n = selectedProfile() ?: return
+        AlertDialog.Builder(this)
+            .setMessage("Delete profile \"$n\"?")
+            .setPositiveButton("Delete") { _, _ -> Config.deleteProfile(this, n); refreshProfiles() }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun setStatus(s: String) = runOnUiThread { status.text = s }

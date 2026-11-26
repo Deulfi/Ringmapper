@@ -43,6 +43,17 @@ object Config {
     fun mode(ctx: Context) = prefs(ctx).getInt("mode", Priv.MODE_AUTO)
     fun autostart(ctx: Context) = prefs(ctx).getBoolean("autostart", false)
 
+    /** Saved profiles: name -> mapping as "key=value" lines (ring name, directions, swipe speed). */
+    private fun profileStore(ctx: Context) = ctx.getSharedPreferences("profiles", Context.MODE_PRIVATE)
+    fun profileNames(ctx: Context) = profileStore(ctx).all.keys.sortedBy { it.lowercase() }
+    fun loadProfile(ctx: Context, name: String): Map<String, String> =
+        profileStore(ctx).getString(name, "")!!.lines().mapNotNull { l ->
+            l.indexOf('=').takeIf { it > 0 }?.let { l.substring(0, it) to l.substring(it + 1) }
+        }.toMap()
+    fun saveProfile(ctx: Context, name: String, values: Map<String, String>) =
+        profileStore(ctx).edit().putString(name, values.entries.joinToString("\n") { "${it.key}=${it.value}" }).apply()
+    fun deleteProfile(ctx: Context, name: String) = profileStore(ctx).edit().remove(name).apply()
+
     fun toFileText(ctx: Context): String = buildString {
         append("name=").append(name(ctx)).append('\n')
         for (d in DIRS) {
