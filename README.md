@@ -52,7 +52,7 @@ The background process does not survive a reboot.
 | Action | Typical use |
 |---|---|
 | Scroll up / down | Scroll web pages, feeds, readers |
-| Touch swipe | Fake finger swipe; the multiplier sets the distance (negative = reverse), the speed field sets the fling |
+| Touch swipe / Ring swipe / Alt swipe | Fake finger swipe, see [Swipes](#swipes) below |
 | D-pad up / down / left / right | Next or previous page/chapter in many readers, TV-style navigation |
 | Page up / down | Page-wise scrolling |
 | Volume up / down | Page turning in readers that support volume keys (Moon+ Reader, Librera, ReadEra…) |
@@ -61,6 +61,22 @@ The background process does not survive a reboot.
 | Custom keycode | Any [Android keycode](https://developer.android.com/reference/android/view/KeyEvent#constants_1), e.g. `22` = D-pad right |
 
 The **multiplier** repeats the action (for example 3 = three scroll steps per swipe).
+
+### Swipes
+
+There are three swipe actions because they feel different, and one is a
+fallback. For all three, the **multiplier** sets the distance (negative =
+reverse) and the **speed** field sets how long the swipe takes. Shorter means
+a harder fling.
+
+| Swipe | What it does | Cost |
+|---|---|---|
+| **Touch swipe** | A straight swipe at constant speed through Ring Mapper's own virtual touchscreen. Use this one first. | Cheap: no extra process per swipe |
+| **Ring swipe** | A short, accelerating flick like the ring's own gesture, but with a sensible length. In landscape it's half as long, so one setting suits both orientations. | Cheap, same as Touch swipe |
+| **Alt swipe** | The same straight swipe as Touch swipe, but sent with Android's `input` command, without a virtual touchscreen. A fallback if the virtual touchscreen misbehaves on your phone. | Expensive: starts a Java process per swipe, which delays each swipe (about 0.9 s on an older phone) |
+
+Touch swipe and Alt swipe are 25% longer in landscape, so the same setting
+feels similar in both orientations.
 
 ## Troubleshooting
 
